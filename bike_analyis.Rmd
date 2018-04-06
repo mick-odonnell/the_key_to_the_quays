@@ -1,0 +1,206 @@
+---
+title: "Bike Travel Dublin"
+output: html_notebook
+---
+
+# Tranport Modal Share for Dublin City Centre
+
+## Introduction
+
+This notebook is intended as a brief analysis of the Central Statistics Office "Workplace Zones" recently released and based on the 2016 Census. The main driver behind this analysis is to determine what modal share of the tranpsort for people who spend their day within Dublin City Centre is by bicycle, and how this compares with the other modes. This is a hugely important topic in the light of all the recent infrastructure projects within Dublin (LUAS Cross City, Bus Rapid Transit Routes) and the ongoing delay in creating a "Liffey Cycle Route".
+
+Just to be upfront, I am an avid cyclist, with a 30+km commute into the centre of the city, and therefore I have an avid belief that cycling is __the__ foremost way to improve the flow of people within the city. Saying that, I am a firm believer in letting the data tell a story, so I will try to be as objective as possible in this analysis.
+
+## Sourcing Data
+
+The data for this analysis is sourced from the website of the Central Statistics Office - Ireland's agency tasked with keeping track of all the numbers. A census was performed in 2016, and aside from the standard information based on where people reside, detailed information has been released that outlines where people work or attend school. Further information can be found at [CSO](http://www.cso.ie/en/census/census2016reports/census2016smallareapopulationstatistics/). 
+
+```{r setup}
+library(dplyr)
+library(magrittr)
+library(sf)
+library(downloader)
+library(stringr)
+library(purrr)
+```
+
+
+```{r load data, cache=TRUE}
+if (!dir.exists("data")) {
+  dir.create("data")
+}
+
+if (!dir.exists("output")) {
+  dir.create("output")
+}
+
+if (!dir.exists("plots")) {
+  dir.create("plots")
+}
+
+if (!file.exists("data/Workplace_Zones_ITM.shp")) {
+# download
+  downloader::download("http://www.cso.ie/censusfiles/Workplace_Zones_ITM.zip",
+                       dest = "data/wz.zip", mode = "wb")
+  unzip("data/wz.zip", exdir = "data")
+  file.remove("data/wz.zip")
+}
+
+if (!file.exists("data/wz.xlsx")) {
+# download
+  downloader::download("http://www.cso.ie/en/media/csoie/census/census2016/census2016results/saps/Workplace_zones_-_SAPS_2016.xlsx", dest = "data/wz.xlsx", mode = "wb")
+}
+
+if (!file.exists("data/wz_lookup.xlsx")) {
+# download
+  downloader::download("http://www.cso.ie/en/media/csoie/census/census2016/census2016results/saps/Workplace_Zones_SAPs_Theme_breakdown.xlsx", dest = "data/wz_lookup.xlsx", mode = "wb")
+}
+
+wp_zones <- st_read("data/Workplace_Zones_ITM.shp")
+
+wp_data <- readxl::read_xlsx("data/wz.xlsx")
+
+wp_lookup <- readxl::read_xlsx("data/wz_lookup.xlsx")
+
+wp_lookup <- wp_lookup[-1,-c(1:2,5)]
+```
+
+The entire data for the Republic of Ireland is now downloaded. We need to subset the data for the area we are interested in. This broadly relates to the area within Dublin City Council. The statistics included in this data are reasonably vague - part of this is because the Census is required to be anonymous, but there is also ambigous aspects to how the people working, at school or at home are counted. Again, read the notes in the CSO description of this data to get more insight. I have done my best to intrepret it, and where possible I've explained my reasoning..
+
+```{r pre-processing}
+wp_zones %>% filter(COUNTY == 'DC') -> dub_wz
+st_crs(dub_wz) <- 2157
+
+# now lets join the polygons with the data
+dub_wz <- dub_wz %>% left_join(wp_data)
+# remove spurious data
+dub_wz <- dub_wz[,-c(1:7)]
+
+# modal share for transport
+#  subset fields
+dub_wz %>% select(T11_C1, starts_with('T2')) -> dub_mode
+dub_mode[is.na(dub_mode)] <- 0
+dub_mode %<>% mutate(prop_cycling = T2_M2 / T2_T) 
+dub_mode %<>% mutate(prop_walking = T2_M1 / T2_T)
+dub_mode %<>% mutate(prop_bus = T2_M3 / T2_T)
+dub_mode %<>% mutate(prop_train = T2_M4 / T2_T)
+dub_mode %<>% mutate(prop_motorcycle = T2_M5 / T2_T)
+dub_mode %<>% mutate(prop_car = (T2_M5 + T2_M6 + T2_M7) / T2_T)
+dub_mode %<>% mutate(prop_other_ns = (T2_M9 + T2_NS) / T2_T)
+
+dub_mode_prop <- dub_mode %>% st_set_geometry(NULL) %>%  round(2)
+dub_mode_prop$guid <- 
+# calculate prop for journey time
+
+dub_wz %>% select(starts_with('T4')) -> dub_journey_time
+
+# calculate time leaving home
+dub_wz %>% select(starts_with('T5')) -> dub_leave_home
+```
+
+We now want to have a look at our data. At this moment in time, the best way to view R geospatial data is via the Leaflet web-mapping package, which is a Java based infrastructure. It allows interactive and close examination of the data in a way that would be familiar to anyone using maps on the internet. The geom_sf functions of the ggplot2 universe have not yet reached production standard, and also I had trouble installing them on my machine for some reason....
+
+```{r mapping}
+
+#first transform our wz data to wgs84, a web friendly projection that'll play nicely with leaflet
+dub_mode_wgs84 <- dub_mode %>% st_transform(4326)
+
+library(leaflet)
+
+#show a map of dublin city centre
+d <- leaflet() %>% addTiles(group = "OSM (default)") %>% 
+  addProviderTiles(providers$OpenMapSurfer.Grayscale, group = "Gray") %>%
+  addProviderTiles(providers$Thunderforest.OpenCycleMap, group = "CycleMap") %>% 
+  addProviderTiles(providers$Esri.WorldImagery, group = "Satellite") 
+  
+  
+d %>%  addMarkers(lng= -6.271394, lat=53.345522, popup="The Dublin Quays")
+
+#now we'd like to show the proportional breakdown of cycling mode
+# first set up a colour palette - see https://www.nceas.ucsb.edu/~frazier/RSpatialGuides/colorPaletteCheatsheet.pdf
+# this also very useful - https://rstudio.github.io/leaflet/choropleths.html
+
+pal_cycling <- colorBin(
+  palette = "YlOrRd",
+  domain = dub_mode_wgs84$prop_cycling)
+
+d_wz_cycling <- d %>% addPolygons(data = dub_mode_wgs84,
+                          weight = 0,
+                          opacity = 1,
+                          color = 'navy',
+                          fillOpacity = 0.6,
+                          fillColor = ~pal_cycling(prop_cycling))
+d_wz_cycling %>% addLegend(pal = pal_cycling, values = dub_mode_wgs84$prop_cycling, position = "bottomright")
+
+pal_car <- colorNumeric(
+  palette = "Reds",
+  domain = dub_mode_wgs84$prop_car)
+
+d_wz_car <- d %>% addPolygons(data = dub_mode_wgs84,
+                          weight = 0,
+                          opacity = 1,
+                          color = 'red',
+                          fillOpacity = 0.6,
+                          fillColor = ~pal_car(prop_car))
+d_wz_car %>% addLegend(pal = pal_car, values = dub_mode_wgs84$prop_car, position = "bottomright")
+
+# create a colour scheme for proportionality
+
+bins <- c(0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
+pal_prop <- colorBin("YlOrRd", domain = c(0, 1), bins = bins)
+
+# add labels to each polygon
+
+car_labels <- sprintf(
+  "%g Motorcycle<br/>%g Car Driver<br/>%g Car Passenger<br/><strong>%g Total</strong>",
+  dub_mode_wgs84$T2_M5, dub_mode_wgs84$T2_M6, dub_mode_wgs84$T2_M7, dub_mode_wgs84$T2_T
+) %>% lapply(htmltools::HTML)
+
+bike_labels <- sprintf(
+  "%g Bicycle<br/><strong>%g Total</strong>",
+  dub_mode_wgs84$T2_M2, dub_mode_wgs84$T2_T
+) %>% lapply(htmltools::HTML)
+
+
+
+d_wz_car_cycling <- d %>% 
+  addPolygons(data = dub_mode_wgs84,
+              group = "Bicycle",
+                          weight = 0,
+                          opacity = 1,
+                          color = 'navy',
+                          fillOpacity = 0.6,
+                          fillColor = ~pal_prop(prop_cycling),
+              label = bike_labels,
+              labelOptions = labelOptions(
+                style = list("font-weight" = "normal", padding = "3px 8px"),
+                textsize = "15px",
+                direction = "auto")
+              ) %>% 
+  addPolygons(data = dub_mode_wgs84,
+              group = "Car (Driver and Passenger)",
+                          weight = 0,
+                          opacity = 1,
+                          color = 'red',
+                          fillOpacity = 0.6,
+                          fillColor = ~pal_prop(prop_car),
+              label = car_labels,
+              labelOptions = labelOptions(
+                style = list("font-weight" = "normal", padding = "3px 8px"),
+                textsize = "15px",
+                direction = "auto")
+              )
+d_wz_car_cycling %<>% addLayersControl(
+  baseGroups = c("OSM (default)", "Gray", "CycleMap", "Satellite"),
+  overlayGroups = c("Bicycle", "Car (Driver and Passenger)"),
+  options = layersControlOptions(collapsed = FALSE)
+) %>% 
+  addLegend(pal = pal_prop, values = bins, position = "bottomright", title = "Proportion of Total Daytime Population")
+  
+d_wz_car_cycling
+
+```
+
+NExt on the list: make this map beautiful..! make it useful - able to view cycling proportion with comparative shares of other modes - see what effect a good transport link has on the outcome - see what the distribution of travel durations is 
+
+
